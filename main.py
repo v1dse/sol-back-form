@@ -9,37 +9,34 @@ from slowapi.middleware import SlowAPIMiddleware
 from pydantic import BaseModel, EmailStr, field_validator
 from typing import Optional
 from datetime import datetime
-import smtplib
+from sendgrid import SendGridAPIClient
+from sendgrid.helpers.mail import Mail
 import os
 import re
 import logging
-from email.mime.text import MIMEText
-from email.mime.multipart import MIMEMultipart
 from dotenv import load_dotenv
 
-# -------------------- LOGGING --------------------
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 )
 logger = logging.getLogger("main")
 
-# -------------------- ENV --------------------
+
 load_dotenv()
 
-# -------------------- APP --------------------
+
 app = FastAPI(
     title="SolProd Contact API",
     version="1.0.0"
 )
 
-# -------------------- RATE LIMIT --------------------
 limiter = Limiter(key_func=get_remote_address)
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 app.add_middleware(SlowAPIMiddleware)
 
-# -------------------- CORS --------------------
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -48,7 +45,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# -------------------- VALIDATION HANDLER --------------------
 @app.exception_handler(RequestValidationError)
 async def validation_exception_handler(_: Request, exc: RequestValidationError):
     errors = []
@@ -61,7 +57,6 @@ async def validation_exception_handler(_: Request, exc: RequestValidationError):
         content={"success": False, "detail": ". ".join(errors)}
     )
 
-# -------------------- REQUEST LOGGER --------------------
 @app.middleware("http")
 async def log_requests(request: Request, call_next):
     logger.info(f"🔵 {request.method} {request.url.path} from {request.client.host}")
@@ -69,7 +64,6 @@ async def log_requests(request: Request, call_next):
     logger.info(f"✅ Response: {response.status_code}")
     return response
 
-# -------------------- MODELS --------------------
 class DiscussProjectRequest(BaseModel):
     name: str
     email: EmailStr
@@ -102,7 +96,7 @@ class DiscussProjectRequest(BaseModel):
             raise ValueError("Comment must be at least 10 characters")
         return v
 
-# -------------------- EMAIL SENDER --------------------
+
 def send_email(
     to_email: str,
     subject: str,
@@ -110,38 +104,36 @@ def send_email(
     text_content: str,
     reply_to: Optional[str] = None
 ):
-    smtp_server = os.getenv("SMTP_SERVER", "smtp.gmail.com")
-    smtp_port = int(os.getenv("SMTP_PORT", "587"))
-    email_user = os.getenv("EMAIL_USER")
-    email_password = os.getenv("EMAIL_PASSWORD")
+    """Отправка email через SendGrid API"""
+    sendgrid_api_key = os.getenv("SENDGRID_API_KEY")
+    from_email = os.getenv("EMAIL_FROM", "noreply@solprod.com")
 
-    if not email_user or not email_password:
-        logger.error("❌ Email credentials missing")
+    if not sendgrid_api_key:
+        logger.error("❌ SENDGRID_API_KEY not configured")
         return
 
     try:
-        logger.info(f"📧 Sending email to {to_email}")
-        msg = MIMEMultipart("alternative")
-        msg["Subject"] = subject
-        msg["From"] = f"SolProd Website <{email_user}>"
-        msg["To"] = to_email
+        logger.info(f"📧 Sending email to {to_email} via SendGrid")
+        
+        message = Mail(
+            from_email=from_email,
+            to_emails=to_email,
+            subject=subject,
+            html_content=html_content,
+            plain_text_content=text_content
+        )
+        
         if reply_to:
-            msg["Reply-To"] = reply_to
+            message.reply_to = reply_to
 
-        msg.attach(MIMEText(text_content, "plain"))
-        msg.attach(MIMEText(html_content, "html"))
-
-        with smtplib.SMTP(smtp_server, smtp_port, timeout=10) as server:
-            server.starttls()
-            server.login(email_user, email_password)
-            server.send_message(msg)
-
-        logger.info("✅ Email sent successfully")
+        sg = SendGridAPIClient(sendgrid_api_key)
+        response = sg.send(message)
+        
+        logger.info(f"✅ Email sent! Status: {response.status_code}")
 
     except Exception as e:
-        logger.error(f"❌ Email error: {e}", exc_info=True)
+        logger.error(f"❌ SendGrid error: {e}", exc_info=True)
 
-# -------------------- ENDPOINTS --------------------
 @app.post("/api/contact/discuss")
 @limiter.limit("5/15minutes")
 async def discuss_project(
@@ -170,7 +162,7 @@ async def discuss_project(
 Name: {data.name}
 Email: {data.email}
 Phone: {data.phone}
-Product: {data.productName}
+Product: {data.productName or '-'}
 
 Comment:
 {data.comment}
@@ -195,7 +187,7 @@ async def health():
     return {
         "status": "OK",
         "timestamp": datetime.utcnow().isoformat(),
-        "email_configured": bool(os.getenv("EMAIL_USER"))
+        "email_configured": bool(os.getenv("SENDGRID_API_KEY"))
     }
 
 @app.get("/")
