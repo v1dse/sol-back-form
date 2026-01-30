@@ -14,28 +14,29 @@ from sendgrid.helpers.mail import Mail
 import os
 import re
 import logging
-from dotenv import load_dotenv
 
-
+# -------------------- LOGGING --------------------
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 )
-logger = logging.getLogger("main")
+logger = logging.getLogger(__name__)
 
-
+# -------------------- ENV --------------------
 load_dotenv()
 
 
+# -------------------- APP --------------------
 app = FastAPI(
     title="SolProd Contact API",
     version="1.0.0"
 )
 
+# -------------------- RATE LIMIT --------------------
 limiter = Limiter(key_func=get_remote_address)
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
-app.add_middleware(SlowAPIMiddleware)
+
 
 app.add_middleware(
     CORSMiddleware,
@@ -44,6 +45,7 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
 
 @app.exception_handler(RequestValidationError)
 async def validation_exception_handler(_: Request, exc: RequestValidationError):
@@ -57,12 +59,19 @@ async def validation_exception_handler(_: Request, exc: RequestValidationError):
         content={"success": False, "detail": ". ".join(errors)}
     )
 
+
 @app.middleware("http")
 async def log_requests(request: Request, call_next):
     logger.info(f"🔵 {request.method} {request.url.path} from {request.client.host}")
-    response = await call_next(request)
-    logger.info(f"✅ Response: {response.status_code}")
-    return response
+    try:
+        response = await call_next(request)
+        logger.info(f"✅ Response: {response.status_code}")
+        return response
+    except Exception as e:
+        logger.error(f"❌ Error: {str(e)}", exc_info=True)
+        raise
+
+
 
 class DiscussProjectRequest(BaseModel):
     name: str
@@ -96,32 +105,34 @@ class DiscussProjectRequest(BaseModel):
             raise ValueError("Comment must be at least 10 characters")
         return v
 
+    @field_validator('comment')
+    @classmethod
+    def comment_must_not_be_empty(cls, v: str) -> str:
+        if not v.strip():
+            raise ValueError('Comment cannot be empty')
+        if len(v.strip()) < 10:
+            raise ValueError('Comment must be at least 10 characters long')
+        return v.strip()
 
-def send_email(
-    to_email: str,
-    subject: str,
-    html_content: str,
-    text_content: str,
-    reply_to: Optional[str] = None
-):
-    """Отправка email через SendGrid API"""
-    sendgrid_api_key = os.getenv("SENDGRID_API_KEY")
-    from_email = os.getenv("EMAIL_FROM", "noreply@solprod.com")
 
-    if not sendgrid_api_key:
-        logger.error("❌ SENDGRID_API_KEY not configured")
-        return
-
+def send_email(to_email: str, subject: str, html_content: str, text_content: str, reply_to: Optional[str] = None):
+    """Отправка email через SMTP"""
     try:
-        logger.info(f"📧 Sending email to {to_email} via SendGrid")
+        smtp_server = os.getenv("SMTP_SERVER", "smtp.gmail.com")
+        smtp_port = int(os.getenv("SMTP_PORT", "587"))
+        smtp_username = os.getenv("EMAIL_USER")
+        smtp_password = os.getenv("EMAIL_PASSWORD")
         
-        message = Mail(
-            from_email=from_email,
-            to_emails=to_email,
-            subject=subject,
-            html_content=html_content,
-            plain_text_content=text_content
-        )
+        logger.info(f"📧 Preparing to send email to: {to_email}")
+        
+        if not smtp_username or not smtp_password:
+            logger.error("❌ Email credentials not configured")
+            raise ValueError("Email credentials not configured")
+
+        message = MIMEMultipart("alternative")
+        message["Subject"] = subject
+        message["From"] = f"SolProd Website <{smtp_username}>"
+        message["To"] = to_email
         
         if reply_to:
             message.reply_to = reply_to
@@ -132,7 +143,9 @@ def send_email(
         logger.info(f"✅ Email sent! Status: {response.status_code}")
 
     except Exception as e:
-        logger.error(f"❌ SendGrid error: {e}", exc_info=True)
+        logger.error(f"❌ Error sending email: {str(e)}", exc_info=True)
+        raise
+
 
 @app.post("/api/contact/discuss")
 @limiter.limit("5/15minutes")
@@ -195,5 +208,25 @@ async def root():
     return {
         "service": "SolProd Contact API",
         "status": "running",
-        "docs": "/docs"
+        "endpoints": {
+            "discuss_project": "/api/contact/discuss",
+            "submit_review": "/api/contact/review",
+            "health": "/api/health",
+            "docs": "/docs"
+        }
     }
+
+
+if __name__ == "__main__":
+    import uvicorn
+    port = int(os.getenv("PORT", 8000))
+    logger.info(f"🚀 Starting server on port {port}")
+    logger.info(f"📧 Email service configured for: {os.getenv('EMAIL_USER', 'Not configured')}")
+    logger.info(f"🌐 CORS enabled for all origins")
+    
+    uvicorn.run(
+        "main:app",
+        host="0.0.0.0",
+        port=port,
+        reload=True
+    )
