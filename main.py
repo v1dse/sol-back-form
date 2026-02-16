@@ -145,7 +145,7 @@ async def discuss_project(
 
     recipient = os.getenv(
         "RECIPIENT_EMAIL",
-        "solutions.production.manager@gmail.com"
+        "support@solprod.agency"
     )
 
     html = f"""
